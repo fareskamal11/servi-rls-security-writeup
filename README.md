@@ -347,9 +347,10 @@ and stored links. Each one added columns or tables, and most of them had the
 same gap as round 1: a check on **who** owns the row, with no check on
 **what** they are allowed to write into it.
 
-The post-fix errors below are the exact messages raised by the fix
-functions. Each fix was checked against the live database with the
-`set local role` method above.
+The post-fix errors below are the exact messages the fix functions raise.
+The `set local role` method above was used to test the fixes for POC-8, 9,
+12, 13, 14 and 15 against the live database. The other post-fix results
+show what the fix code does.
 
 ---
 
