@@ -1,40 +1,98 @@
 # Row Level Security Escape Hatches
 
-Seventeen proof-of-concept requests against **SERVI**'s production Supabase
-project — a mobile service-booking app (Expo/React Native) with no custom
-backend: every table is reachable directly from the client through
-PostgREST, so Row Level Security policies are the **entire** authorization
-boundary. Each PoC is a normal, authenticated API call a real client could
-make; none of them touch an admin/service-role key. All seventeen are
-patched as of this write-up.
+**A security assessment of SERVI's Supabase backend: 17 findings, each with
+a working proof of concept, a root cause and a verified fix.**
 
-The findings came from two audit rounds. **Round 1** (POC-1 to POC-6) was
-the original RLS audit. **Round 2** (POC-7 to POC-17) came from later
-pre-launch reviews, after the app gained a business-approval gate, email
-notifications, phone numbers and an admin role. Every new feature brought a
-new way to get the same old bug.
+| | |
+|---|---|
+| **Target** | SERVI, a service-booking app (Expo/React Native + Supabase) |
+| **Scope** | Postgres Row Level Security, grants, triggers, Storage policies, Edge Functions, email templates, client link handling |
+| **Method** | Manual white-box review of every migration and policy, then exploitation as a normal signed-in user or `anon` |
+| **Result** | 4 Critical · 5 High · 7 Medium · 1 Low. **All 17 fixed and re-tested** |
+| **Author** | Fares Kamal (developer and owner of SERVI) |
 
-| # | Severity | Finding | Status |
-|---|---|---|---|
-| **Round 1** | | | |
-| [POC-1](#poc-1--self-role-escalation-via-profilesrole) | **Critical** | Self role escalation via `profiles.role` | Fixed |
-| [POC-2](#poc-2--customer-self-confirms-their-own-booking) | High | Customer self-confirms their own booking | Fixed |
-| [POC-3](#poc-3--booking-price-forgery-via-booking_services) | High | Booking price forgery via `booking_services` | Fixed |
-| [POC-4](#poc-4--review-posted-against-a-never-completed-booking) | Medium | Review posted against a never-completed booking | Fixed |
-| [POC-5](#poc-5--system-wide-cron-function-callable-by-anon) | Medium | System-wide cron function callable by `anon` | Fixed |
-| [POC-6](#poc-6--conversation-hijack-via-participant-reassignment) | Medium | Conversation hijack via participant reassignment | Fixed |
-| **Round 2** | | | |
-| [POC-7](#poc-7--any-user-grants-themselves-admin-via-profilesis_admin) | **Critical** | Any user grants themselves admin via `profiles.is_admin` | Fixed |
-| [POC-8](#poc-8--business-inserted-already-approved) | **Critical** | Business inserted already `approved`, skipping review | Fixed |
-| [POC-9](#poc-9--business-reads-its-own-approval-token-and-self-approves) | **Critical** | Business reads its own approval token and self-approves | Fixed |
-| [POC-10](#poc-10--stored-javascript-link-runs-in-a-customers-session) | High | Stored `javascript:` link runs in a customer's session | Fixed |
-| [POC-11](#poc-11--html-injection-into-the-admins-approval-email) | High | HTML injection into the admin's approval email | Fixed |
-| [POC-12](#poc-12--forged-booking-insert) | High | Forged booking insert (status, staff, duration) | Fixed |
-| [POC-13](#poc-13--one-completed-booking-reviews-any-business) | Medium | One completed booking reviews *any* business | Fixed |
-| [POC-14](#poc-14--customer-reactivates-a-booking-the-business-cancelled) | Medium | Customer reactivates a booking the business cancelled | Fixed |
-| [POC-15](#poc-15--customer-marks-their-own-phone-number-verified) | Medium | Customer marks their own phone number "verified" | Fixed |
-| [POC-16](#poc-16--unapproved-business-data-publicly-readable) | Medium | Unapproved business's services/staff/photos publicly readable | Fixed |
-| [POC-17](#poc-17--avatar-bucket-lists-every-user-id) | Low | Avatar bucket lists every user id | Fixed |
+## Summary
+
+SERVI has no custom backend. The mobile app talks straight to Postgres
+through Supabase's REST API (PostgREST), so Row Level Security policies are
+the **entire** authorization boundary. Any gap in a policy can be exploited
+by anyone who signs up.
+
+Every PoC here is a request a normal client could send. None of them needs
+the service-role key or any other secret. The most serious findings let any
+user:
+
+- **become an admin** (POC-7) or change their own account type (POC-1)
+- **skip the business approval review** entirely (POC-8, POC-9)
+- **steal another user's session** through a stored `javascript:` link (POC-10)
+- **phish the admin** with a fake "Approve" button injected into a system email (POC-11)
+- **forge prices, booking status and durations** to get free services or block a
+  competitor's calendar (POC-3, POC-12)
+
+The work ran in two rounds. **Round 1** (POC-1 to POC-6) was the first
+audit of the RLS policies. **Round 2** (POC-7 to POC-17) came from
+pre-launch reviews after the app added an admin role, a business approval
+gate, email notifications and phone numbers. Most new features reopened the
+same kind of hole round 1 had closed.
+
+## Authorization and ethics
+
+I built SERVI and own its Supabase project. All testing was done on my own
+system with my own test accounts. Every SQL payload ran inside
+`begin; ... rollback;` so nothing persisted, and no real user's data was
+read or changed. Every issue was fixed before this write-up was published.
+Nothing here targets a third-party system.
+
+## Findings
+
+Mapped to [CWE](https://cwe.mitre.org/) and the
+[OWASP API Security Top 10 (2023)](https://owasp.org/API-Security/editions/2023/en/0x11-t10/)
+or [OWASP Top 10 (2021)](https://owasp.org/Top10/).
+
+| # | Severity | Finding | CWE | OWASP | Status |
+|---|---|---|---|---|---|
+| **Round 1** | | | | | |
+| [POC-1](#poc-1--self-role-escalation-via-profilesrole) | **Critical** | Self role escalation via `profiles.role` | CWE-269 | API3 | Fixed |
+| [POC-2](#poc-2--customer-self-confirms-their-own-booking) | High | Customer self-confirms their own booking | CWE-915 | API3 | Fixed |
+| [POC-3](#poc-3--booking-price-forgery-via-booking_services) | High | Booking price forgery via `booking_services` | CWE-602 | API6 | Fixed |
+| [POC-4](#poc-4--review-posted-against-a-never-completed-booking) | Medium | Review posted against a never-completed booking | CWE-840 | API6 | Fixed |
+| [POC-5](#poc-5--system-wide-cron-function-callable-by-anon) | Medium | System-wide cron function callable by `anon` | CWE-732 | API5 | Fixed |
+| [POC-6](#poc-6--conversation-hijack-via-participant-reassignment) | Medium | Conversation hijack via participant reassignment | CWE-639 | API1 | Fixed |
+| **Round 2** | | | | | |
+| [POC-7](#poc-7--any-user-grants-themselves-admin-via-profilesis_admin) | **Critical** | Any user grants themselves admin via `profiles.is_admin` | CWE-269 | API3 | Fixed |
+| [POC-8](#poc-8--business-inserted-already-approved) | **Critical** | Business inserted already `approved`, skipping review | CWE-915 | API3 | Fixed |
+| [POC-9](#poc-9--business-reads-its-own-approval-token-and-self-approves) | **Critical** | Business reads its own approval token and self-approves | CWE-200 | API3 | Fixed |
+| [POC-10](#poc-10--stored-javascript-link-runs-in-a-customers-session) | High | Stored `javascript:` link runs in a customer's session | CWE-79 | A03 | Fixed |
+| [POC-11](#poc-11--html-injection-into-the-admins-approval-email) | High | HTML injection into the admin's approval email | CWE-80 | A03 | Fixed |
+| [POC-12](#poc-12--forged-booking-insert) | High | Forged booking insert (status, staff, duration) | CWE-602 | API6 | Fixed |
+| [POC-13](#poc-13--one-completed-booking-reviews-any-business) | Medium | One completed booking reviews *any* business | CWE-639 | API1 | Fixed |
+| [POC-14](#poc-14--customer-reactivates-a-booking-the-business-cancelled) | Medium | Customer reactivates a booking the business cancelled | CWE-840 | API6 | Fixed |
+| [POC-15](#poc-15--customer-marks-their-own-phone-number-verified) | Medium | Customer marks their own phone number "verified" | CWE-915 | API3 | Fixed |
+| [POC-16](#poc-16--unapproved-business-data-publicly-readable) | Medium | Unapproved business's services/staff/photos publicly readable | CWE-200 | API1 | Fixed |
+| [POC-17](#poc-17--avatar-bucket-lists-every-user-id) | Low | Avatar bucket lists every user id | CWE-548 | API8 | Fixed |
+
+**Severity** reflects impact on this app: who can exploit the bug (any
+signed-up user, or a business owner) and what they gain (admin rights,
+another user's session, money, or someone else's data).
+
+## Methodology
+
+1. **Inventory.** Listed every table, policy, grant, `SECURITY DEFINER`
+   function, trigger and Storage policy from the migrations and the live
+   catalog (`pg_policies`, `information_schema`, `has_function_privilege`).
+2. **Threat model.** For each table, asked what a customer, a business owner
+   and an anonymous visitor should be able to read and write, column by
+   column, and compared that with what the policy actually allows.
+3. **Exploit.** Wrote each suspected gap as a payload and ran it as the
+   attacker role (method below). A finding only counts if the payload
+   worked.
+4. **Fix.** Fixed the database first (triggers, constraints, policies,
+   moving secrets into their own tables), and the client second where needed.
+5. **Re-test.** Re-ran the same payload and recorded the post-fix error,
+   plus a control test to show the legitimate app path still works.
+
+**Tools:** PostgreSQL / psql, Supabase SQL editor and MCP, PostgREST over
+`curl`, the Supabase Security Advisor, and reading the code.
 
 ## Why this class of bug exists
 
@@ -45,7 +103,9 @@ RLS's `USING` clause governs which rows are *visible*; `WITH CHECK` governs
 what the *new* row may look like. Skip `WITH CHECK` on an UPDATE policy and
 Postgres silently reuses `USING` for it — which only re-confirms "is this
 still my row," never "did I only change the columns the UI meant to
-expose." Every finding below is a variation on that one gap.
+expose." Every round-1 finding is a variation on that one gap. Round 2
+adds the other places user input crosses a trust boundary: HTML emails,
+browser URLs and Storage.
 
 ## Reproducing these without a real device or JWT
 
@@ -963,7 +1023,7 @@ Then check every `grant execute` against
 grant statement you wrote — Postgres and Supabase both layer default
 privileges you didn't ask for (POC-5).
 
-The recurring lesson across all six: RLS policies see either the old row
+The recurring lesson across round 1: RLS policies see either the old row
 (`USING`) or the new row (`WITH CHECK`), never both at once — a trigger is
 the only construct that can actually compare them.
 
@@ -980,9 +1040,34 @@ Round 2 adds four more checks:
 
 ---
 
-*All seventeen PoCs were run against SERVI's own database, either as direct
-SQL simulating an authenticated session with `set local role` +
-`request.jwt.claim.sub`, or as plain REST calls with the public anon key
-(POC-9, POC-16, POC-17). No third-party target, and no credentials beyond
-the tester's own accounts. Every fix shown is live in the
-schema as of this write-up.*
+## Skills demonstrated
+
+- **Application security testing:** white-box review, threat modeling per
+  role and per column, writing working PoCs for each finding
+- **Database security:** PostgreSQL Row Level Security, grants and default
+  privileges, `SECURITY DEFINER` functions, guard triggers, column-level
+  security and why it fails with PostgREST
+- **Web security:** stored XSS through URL schemes, HTML injection in email,
+  phishing risk in admin workflows
+- **Cloud / BaaS security:** Supabase Auth, Storage bucket policies, Edge
+  Function authentication, the Security Advisor
+- **Fix and verification:** fixed every finding in the database first, then
+  proved each fix with the original payload and a control test
+- **Reporting:** severity rating, CWE / OWASP mapping, root cause and a
+  reusable audit checklist
+
+## Related work
+
+- [Entra ID Zero Trust lab](https://github.com/fareskamal11/Entra-id-zero-trust-lab):
+  MFA, Conditional Access, RBAC, PIM and identity lifecycle in Microsoft Entra ID
+- [Phishing detection](https://github.com/fareskamal11/fares-phishing-detection)
+
+---
+
+*All seventeen PoCs were run by the app's owner against SERVI's own
+Supabase project, either as direct SQL simulating an authenticated session
+with `set local role` + `request.jwt.claim.sub` (wrapped in `begin; ...
+rollback;`), or as plain REST calls with the public anon key (POC-9, POC-16,
+POC-17). No third-party target, no real users' data, and no credentials
+beyond the tester's own accounts. Every fix shown is live in the schema as
+of this write-up.*
